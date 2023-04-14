@@ -1,0 +1,456 @@
+---
+title: "Esame"
+author: "Luca Santanché"
+date: "10/02/2022"
+output:
+  html_document: 
+    code_folding: hide
+    df_print: kable
+    highlight: espresso
+    number_sections: yes
+    toc: yes
+  pdf_document: 
+    keep_tex: yes
+    number_sections: yes
+    toc: yes
+---
+
+
+```{r,setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+# Setting time series
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(AER)
+library(dplyr)
+library(DBI)
+library(readxl)
+library(knitr)
+library(xtable)
+library(dbplyr)
+library(TTR)
+library(fpp2)
+library(tsbox)
+library(zoo)
+library(lubridate)
+library(forecast)
+library(ggplot2)
+library(tseries)
+library(dygraphs)
+library(stats)
+library(vars)
+library(gbm)
+library(Hmisc)
+library(DT)
+library(xts)
+library(zoo)
+```
+
+Import the datasets
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+alarms<- read.csv('allarmi_30147127.csv')
+pressures<- read.csv("p_30147127.csv")
+```
+
+# Data Exploration
+
+Let's start with an exploratory data analysis. It's always fundamental to have a deep understanding of the datasets.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+datatable(head(pressures, 100), options = list(
+  columnDefs = list(list(className = 'dt-center')),
+  pageLength = 5
+))
+```
+
+The pressure's dataset contains a column named "ts", which contains a date and a time, and a "value" column, with values of the pressure, round by 2 significant digits.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+datatable(head(alarms, 100), options = list(
+  columnDefs = list(list(className = 'dt-center')),
+  pageLength = 5
+))
+```
+
+The alarm dataset, on the other hand, contains a column "date_time", with a date and a time, and one named "priorita", with the priority of the alarm occurred.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+str(alarms)
+str(pressures)
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+unique(alarms$priorita)
+```
+The values of "priorita" are only three.
+The "date_time" and "ts" columns of the two dataset are in a character format. It's useful to convert them into POSIXct. Furthermore, the "priorita" is not usable in a character format, so it will be converted into a numeric type.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+alarms$date_time = ymd_hms(alarms$date_time)
+alarms$priorita = recode(alarms$priorita, "bassa"=1, "media"=2, "alta"=3)
+pressures$ts = ymd_hms(pressures$ts)
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+summary(pressures)
+summary(alarms)
+```
+
+For the priority's encoding has been used the numbers 1,2,3 so that the 0 will represent, in the merged dataset, the condition with no alarm occurred, which is obviously present because of the different size of the datasets.
+It can be useful to plot the pressures dataset...
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+plot(pressures$ts, pressures$value, type="l")
+```
+
+... and to take a look at the summary statistics
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+summary(pressures)
+summary(alarms)
+```
+
+By checking the summary statistics and the plot seems clear that there's an outlier, a very small value. It's useful to check whether this value correspond to an alarm
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+data = pressures[pressures$value==min(pressures$value),1]
+data
+alarms[format(alarms$date_time, "%Y-%m-%d %h")==format(data, "%Y-%m-%d %h"),]
+```
+
+There is an alarm in correspondence of this value, so it's possible that this value has been actually verified.
+
+Check duplicates
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+alarms[duplicated(alarms),]
+pressures[duplicated(pressures),]
+```
+
+There are no duplicates in the dataset
+
+Is usually useful to check the missing values of the dataset
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(naniar)
+alarms %>%
+  miss_var_summary()
+
+pressures %>%
+  miss_var_summary()
+```
+
+In these datasets there are no missing values.
+
+# Data Preprocessing
+
+It's necessary to group the alarms' observations into intervals of 15 minutes. The "priorita" column will be summarized with a "max" function, since in a period of 15 minutes the maximum priority will be taken as the main one.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+alarms2 = alarms %>%
+  mutate(date_time = floor_date(alarms$date_time, unit="15 mins")) %>%
+  group_by(date_time) %>%
+  summarise(priorita=max(priorita))
+```
+
+Now it's possible to merge the two dataset. The merge is an outer one, so that we will keep all the pressure's values and the alarms' priority. Then, the resulting NA's in the "priorita" column will be replaced with 0s, since the absence of an alarm can be indexed with such value.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+df = merge(alarms2, pressures, by.x="date_time", by.y="ts", all=T)
+df$priorita[is.na(df$priorita)] = 0
+summary(df)
+```
+
+There are some values of the pressure that are NA's. It seems necessary to replace them.
+One idea can be to compute the mean pressure of "alta", "media" and "bassa" value of priority, and replace them with this criteria. I've tried this but it's not effective, so a na.locf procedure will be implemented.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+#m1 = mean(df$value[(df$priorita==1)&(!is.na(df$value))])
+#m2 = mean(df$value[(df$priorita==2)&(!is.na(df$value))])
+#m3 = mean(df$value[(df$priorita==3)&(!is.na(df$value))])
+#m1
+#m2
+#m3
+
+#df$value[(df$priorita==1)&(is.na(df$value))] = m1
+#df$value[(df$priorita==2)&(is.na(df$value))] = m2
+#df$value[(df$priorita==3)&(is.na(df$value))] = m3
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+df = na.locf(df)
+```
+
+The creation of xts and ts class will be useful for the following operations.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+priorita_xts=xts(x=df$priorita, order.by=df$date_time)
+value_xts=xts(x=df$value, order.by=df$date_time)
+priorita_ts=as.ts(x=df$priorita, start=df$date_time[1])
+value_ts=as.ts(x=df$value, start=df$date_time[1])
+```
+
+Regularity and stationarity are two of the main characteristics of the time series.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+is.regular(priorita_xts)
+is.regular(value_xts)
+is.regular(priorita_xts, strict=T)
+is.regular(value_xts, strict=T)
+```
+
+The time series is regular but not strictly. In fact, there is a regular underlying structure but the values are not equally spaced. 
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+adf.test(priorita_ts, alternative="stationary", k=0)
+adf.test(value_ts, alternative="stationary", k=0)
+```
+
+The Dickey-Fuller reveals they're both stationary, with a small p-value.
+
+Setting the best frequency is essential for an effective forecasting.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+frequency(value_xts)
+frequency(priorita_xts)
+periodicity(value_xts)
+periodicity(priorita_xts)
+```
+
+The observed data have a 15 minutes periodicity, and there are different possible choices. A frequency of 96 (4*24) means a daily frequency
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+attr(value_xts, "frequency") = 4
+attr(priorita_xts, "frequency") = 4
+periodicity(value_xts)
+periodicity(priorita_xts)
+```
+
+
+There seems to be no need to filter the dataset
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+acf(value_xts)
+acf(priorita_xts)
+pacf(value_xts)
+pacf(priorita_xts)
+```
+
+# Data models ARIMA
+
+The first model that can be used to forecast time series is an ARIMA model. To do so, it's necessary to consider the univariate time series composed of pressure values.
+
+The first step is to split of the dataset into two subsets: a train set and a validation set
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+train = value_xts[index(value_xts) <= "2019-04-14"]
+test = value_xts[index(value_xts) > "2019-04-14"]
+```
+
+## Training
+
+Searching for the best ARIMA model according to the training set
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+arima <- auto.arima(train, trace= T)
+```
+
+Fitting the model
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+fit_arima<- xts(arima$fitted, order.by = index(train))
+```
+
+Visually checking the results of the fitting
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+confronto_arima <- cbind(fit_arima, train) 
+dygraph(confronto_arima) %>% dyRangeSelector()
+```
+
+Checking the results based on the measures
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+accuracy(arima)
+
+# pseudo R2
+cor(fitted(arima),train)^2
+```
+
+## Validation
+
+Applying the ARIMA model found to the validation set
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+predizione_arima <- predict(arima, nrow(test), prediction.interval = TRUE)
+predizione_arima
+```
+
+By transforming such prediction into an xts object and combining with the actual values, it's possible to plot the prediction against the actual values
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# extract prediction values
+predizione_arima_xts <- xts(predizione_arima$pred, order.by = index(test))
+# combine original values + training + prediction
+modello_arima <- cbind(predizione_arima_xts, test, train)
+```
+
+Plot
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+dygraph(modello_arima) %>% dyRangeSelector() %>% 
+dyOptions(colors = RColorBrewer::brewer.pal(3, "Set1"))
+```
+
+Furthermore it's useful to check the accuracy measures of the forecast
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+accuracy(predizione_arima$pred , test)
+```
+
+## Forecasting
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+end(test)
+```
+
+The last date is 17-04-2019 at 23:00:00. The forecasting can be of the next 12 hours.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+## Next time index
+time_index <- seq(from = as.POSIXct("2019-04-17 23:00:00"), to = as.POSIXct("2019-04-18 11:00:00"), by="15 min")
+
+# find number period
+index(time_index)
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+forecast = forecast(arima, length(time_index))
+forecast_xts<- xts(forecast$mean, order.by = time_index)
+```
+
+Finally, the plot of the forecasting
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+predizione<- cbind(forecast_xts, value_xts)
+
+
+dygraph(predizione) %>% dyRangeSelector() %>% 
+dyOptions(colors = RColorBrewer::brewer.pal(3, "Set1"))
+```
+
+# VAR/VECM
+
+The usual approach is to use Johansen’s method for testing whether or not cointegration exists. If the answer is “yes” then a vector error correction model (VECM), which combines levels and differences, can be estimated instead of a VAR in levels.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+train = as.ts(df[df$date_time <= "2019-04-14",c(2,3)])
+test = as.ts(df[df$date_time > "2019-04-14",c(2,3)])
+train2 = xts(df[df$date_time <= "2019-04-14",], order.by=df$date_time[df$date_time <= "2019-04-14"])
+test2 = xts(df[df$date_time > "2019-04-14",], order.by=df$date_time[df$date_time > "2019-04-14"])
+```
+
+## Training
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+po.test(train)
+```
+
+The Phillips-Ouliaris cointegration test reveals that the series are correlated. It was obvious, since one series is highly correlated to the other one.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+df_ts = as.ts(df[,c(2,3)])
+var_select<- VARselect(df_ts, lag.max = 10, type = "both")
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+cointest <- ca.jo(train,K=var_select$selection[1],type = "eigen", ecdet = "const", spec = "transitory")
+summary(cointest)
+```
+
+The Johansen's procedure highlights that the rank of the matrix is 2, since the hypothesis of rank=0 and rank<=1 are rejected.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+cointest <- ca.jo(train,K=var_select$selection[1],type = "eigen", ecdet = "const", spec = "transitory")
+vecm <- cajorls(cointest, r=1)
+
+
+#Transform VECM to VAR
+var <- vec2var(cointest)
+```
+
+## Validation
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+# Predict
+forecast_dfb <- predict(var, n.ahead=232) # VECM
+#forecast_LT2b$fcst$xts_LT2[,1]  # predictes values
+
+# xts and ts class
+predizione_dfb <- xts(forecast_dfb$fcst$value[,1] , order.by = index(test2))
+predizione_dfbts <- ts(predizione_dfb)
+
+# combine training and predicted values
+pred_dfb <- cbind(predizione_dfb, test2$value, train2$value)
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+accuracy(predizione_dfbts, as.numeric(test2$value))
+```
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+dygraph(pred_dfb) %>% dyRangeSelector() %>% 
+dyOptions(colors = RColorBrewer::brewer.pal(3, "Set1"))
+```
+
+## Forecast
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+time_index <- seq(from = as.POSIXct("2019-04-17 23:00:00"), to = as.POSIXct("2019-04-18 11:00:00"), by="15 min")
+index(time_index)
+```
+
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+forecast <- predict(var,n.ahead=length(time_index))
+
+predizione_p_xts <- xts(forecast$fcst$value[,1] , order.by = time_index)
+
+df_xts = xts(df, order.by=df$date_time)
+
+predizione <- cbind(predizione_p_xts,df_xts$value)
+
+dygraph(predizione) %>% dyRangeSelector() %>% 
+dyOptions(colors = RColorBrewer::brewer.pal(3, "Set1"))
+```
+
+Accuracy measures of ARIMA(3,1,2)(2,0,2)[4]:
+         ME          RMSE      MAE        MPE         MAPE
+Test set -0.01770934 0.0597344 0.04656612 -0.07439064 0.1943499
+
+Accuracy measures of VECM:
+         ME          RMSE       MAE        MPE        MAPE
+Test set 0.008751104 0.05710784 0.04692652 0.03592482 0.1956478
+
+So, to summarize, the two models are quite similar in performances.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+df[df$priorita==1,3]
+df[df$priorita==2,3]
+df[df$priorita==3,3]
+```
+
+With the exception of one single value, the thresholds seems to be:
+
+"bassa" -> 23.6
+"media" -> 23.7
+"alta" -> 23.8 
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+colnames(predizione_p_xts) = "Pressione"
+predizione_p_xts$Stato = ifelse(predizione_p_xts$Pressione<23.6, "normale", ifelse(predizione_p_xts$Pressione<23.7, "bassa", ifelse(predizione_p_xts$Pressione<23.8, "media", "alta")))
+predizione_p_xts
+```
